@@ -72,6 +72,25 @@ and returning nothing for it is how a reader turns two words into one. This
 file's own comment claimed the defect was avoided while the code had it; the
 first test run said otherwise.
 
+⛔ **And that defect had a second half, which lived here much longer.** A text
+node that *begins* with whitespace and then has content — the ` two` after
+`</b>` in `<b>one</b> two` — had its leading space dropped, because the
+collapser only emitted a space once it had already written something. So
+`<b>one</b> two <b>three</b> four` came out as **`onetwo threefour`**: every
+paragraph with an `<i>`, a `<b>`, a `<span>` or a link lost a space at each of
+those boundaries, under [`epub`](https://github.com/go-richdoc/epub),
+[`email`](https://github.com/go-richdoc/email) and
+[`mobi`](https://github.com/go-richdoc/mobi) alike.
+
+Nothing failed. The words were all there and two of them were stuck together,
+which no block count and no substring test can see. What saw it was a **second
+rendering of the same text**: Project Gutenberg's MOBI of *Pride and Prejudice*
+against Gutenberg's own plain text of the same book — 125 816 words against
+126 630, and 86.3% of its long sentences found verbatim. One line later:
+**126 512 words, and 97.9%** (4 125 of 4 215). The table in
+`TestWhitespaceIsCollapsedAndNotSwallowed` now has a case on *each* side of a
+marking, because every case it had put the space in a node of its own.
+
 **What richdoc has no word for is kept where keeping it is honest.** `svg` and
 `math` become `RawBlock`/`RawInline` with the format named. `sub`, `sup`,
 `mark` and `span` keep their text and lose their marking — losing the 2 of
