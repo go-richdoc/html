@@ -110,6 +110,17 @@ as a refusal that names this package, never as a panic.
 - A **real published page** as a fixture, not only hand-written snippets:
   go-pdfkit's table detector passed every fixture and then found 588 tables in
   one real PDF.
+- **A fuzz target** (`FuzzParse`, v0.1.1), which this package earns more than
+  most: it reads HTML, HTML is plain text, and a fuzzer explores plain text
+  cheaply — 1.5M executions produced **490 interesting inputs**, against 32 for
+  the same budget on `go-richdoc/epub`'s checksummed container. Since that
+  package hands this one every chapter of every publication, a tree shape that
+  breaks this breaks that too.
+  It asserts no panic, a document OR an error and never neither, determinism —
+  the reader keeps attributes in a map, and Go randomises map iteration on
+  purpose — and **both limits measured on the OUTPUT**: the node count, and the
+  nesting DEPTH, which is an invariant about the returned tree that no unit case
+  had stated. Nothing found.
 
 ## The rest of the family
 
