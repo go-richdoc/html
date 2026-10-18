@@ -351,6 +351,25 @@ func TestWhitespaceIsCollapsedAndNotSwallowed(t *testing.T) {
 		{"trailing space after a marking is dropped", "<p><b>one</b>  </p>", "p <strong>one</strong>\n"},
 		{"a non-breaking space is a character, not whitespace", "<p>10\u00a0km</p>", "p 10 km\n"},
 		{"whitespace-only text between blocks is nothing", "<div><p>a</p>\n  \n<p>b</p></div>", "p a\np b\n"},
+
+		// ⛔ THE SPACE AFTER A MARKING, which is the one this table did not
+		// have and the one that was broken. Every case above has the space in
+		// a node of its OWN — "<b>one</b> <i>two</i>" — where the
+		// whitespace-only branch at the top of collapse answered correctly.
+		// The defect was a node that BEGINS with whitespace and then has
+		// content: the text after `</b>` in "<b>one</b> two". Its leading
+		// space was dropped because the builder was still empty, so the two
+		// words became one, in every paragraph of every converted ebook
+		// holding an <i>, a <b>, a <span> or a link. Found by reading a real
+		// Kindle book: 125 816 words against a reference's 126 630.
+		{"a space after a marking survives", "<p><b>one</b> two</p>", "p <strong>one</strong> two\n"},
+		{"and between two markings with words between them", "<p><b>one</b> two <b>three</b> four</p>",
+			"p <strong>one</strong> two <strong>three</strong> four\n"},
+		{"a space after a span survives", "<p><span>Walt Whitman</span> has somewhere.</p>", "p Walt Whitman has somewhere.\n"},
+		{"a space before a marking still survives", "<p>a <span>b</span> c</p>", "p a b c\n"},
+		{"nested, where the inner marking ends first", "<p><i><span>nested</span> after</i></p>",
+			"p <em>nested after</em>\n"},
+		{"a space after a link", `<p><a href="/x">text</a> after</p>`, "p [text](/x) after\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := shape(parse(t, tc.src).Blocks, ""); got != tc.want {

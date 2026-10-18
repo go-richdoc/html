@@ -170,13 +170,24 @@ func collapse(s string) string {
 			b.WriteString(" ")
 			continue
 		}
-		if space && b.Len() > 0 {
+		// ⛔ NO `b.Len() > 0` HERE. That condition dropped the LEADING space of
+		// every text node that begins with whitespace and then has content —
+		// which is the node after `</b>` in "<b>one</b> two". The words either
+		// side became one word: "onetwo three", in every paragraph of every
+		// converted ebook that contains an `<i>`, a `<b>`, a `<span>` or a
+		// link. Nothing failed; the prose was simply wrong.
+		//
+		// A leading space here is correct and cheap: at a block's edge trim
+		// drops it, and between two inline elements it is the space the author
+		// wrote. That is what the comment above this function has always said
+		// the design was — this is the line where it leaked.
+		if space {
 			b.WriteByte(' ')
 		}
 		space = false
 		b.WriteRune(r)
 	}
-	if space && b.Len() > 0 {
+	if space {
 		b.WriteByte(' ')
 	}
 	return b.String()
