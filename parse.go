@@ -28,11 +28,44 @@ type Limits struct {
 	// nested document is one shape of abuse; a flat document with four million
 	// empty spans is the other, and MaxDepth says nothing about it.
 	MaxNodes int
+
+	// MaxInputBytes is how much source this reader will take.
+	//
+	// ⛔ THE TWO CEILINGS ABOVE BOUND THE WALK AND NOT THE PARSE, and that is
+	// not a bound on memory. golang.org/x/net/html builds its whole tree before
+	// conv.spend is called once, and it has no ceiling of its own to fall back
+	// on: its only limit is Tokenizer.SetMaxBuf, which html.Parse does not set
+	// (x/net v0.62.0, token.go:149 and :1278; parse.go and node.go hold no
+	// depth or node bound at all). Measured: 100 000 <br> and 800 000, both
+	// refused at node 1 001 of a caller's ceiling, cost 12 MB and 96 MB — a
+	// ratio of 8.0 for 8x the source. The refusal arrived; the allocation had
+	// already happened, and nothing capped it.
+	//
+	// 64 MiB is what the rest of the family uses, and the population agrees:
+	// over 123 369 real HTML files on one machine the biggest is 19.87 MB
+	// (Chromium's licence page) and p99.9 is 1.77 MB.
+	MaxInputBytes int
+
+	// MaxSourceElements is how many tags the source may contain, counted by the
+	// tokenizer before any tree is built, so that a hostile document is refused
+	// without being parsed.
+	//
+	// ⛔ IT IS ITS OWN CEILING AND NOT A PROXY FOR MaxNodes. It cannot be
+	// derived from one: tags in <head> are never walked, so a document could
+	// hold a million of them and reach MaxNodes at zero — a source-side count
+	// is no lower bound on what the walk will count, and a guard that refuses
+	// what the thing it protects would accept is worse than no guard. So this
+	// bounds the SOURCE, says so, and takes its number from the population:
+	// the widest of 123 369 real files holds 98 961 elements, and 1 << 20
+	// leaves that an order of magnitude of room.
+	MaxSourceElements int
 }
 
 const (
-	defaultMaxDepth = 256
-	defaultMaxNodes = 1 << 20
+	defaultMaxDepth          = 256
+	defaultMaxNodes          = 1 << 20
+	defaultMaxInputBytes     = 64 << 20
+	defaultMaxSourceElements = 1 << 20
 
 	// headingLevels is as many as richdoc's writers have.
 	headingLevels = 6
@@ -45,7 +78,46 @@ func (l Limits) orDefaults() Limits {
 	if l.MaxNodes <= 0 {
 		l.MaxNodes = defaultMaxNodes
 	}
+	if l.MaxInputBytes <= 0 {
+		l.MaxInputBytes = defaultMaxInputBytes
+	}
+	if l.MaxSourceElements <= 0 {
+		l.MaxSourceElements = defaultMaxSourceElements
+	}
 	return l
+}
+
+// countSourceElements is how many tags the source holds, stopping at the
+// ceiling.
+//
+// ⛔ IT COUNTS WITH THE TOKENIZER AND NOT WITH A SCAN FOR '<'. A scan counts
+// the '<' inside an attribute value, inside a comment and inside a <script>,
+// and the three disagree with the parser in different directions — so a guard
+// built on one would refuse documents over characters the parser never read as
+// markup.
+//
+// ⛔ And it asks for no TagName. The name is not needed to count a tag, and
+// z.TagName() copies one per token: the whole value of refusing before the tree
+// is built is lost if the refusal allocates per tag anyway.
+func countSourceElements(src []byte, max int) error {
+	z := xhtml.NewTokenizer(bytes.NewReader(src))
+	n := 0
+	for {
+		switch z.Next() {
+		case xhtml.ErrorToken:
+			// ⛔ Whatever the tokenizer stopped for — EOF or a malformed
+			// stream — is not this function's business. html.Parse accepts
+			// every input the HTML5 algorithm can recover, which is all of
+			// them, and inventing a syntax error here would refuse documents
+			// the reader has always read.
+			return nil
+		case xhtml.StartTagToken, xhtml.SelfClosingTagToken:
+			n++
+			if n > max {
+				return fmt.Errorf("html: more than %d elements in the source", max)
+			}
+		}
+	}
 }
 
 // Parse reads HTML or XHTML into a document.
@@ -60,8 +132,21 @@ func Parse(src []byte, lim Limits) (*richdoc.Document, error) {
 	// every input including no bytes at all. A branch no input can reach is a
 	// branch no test can defend, and this package's CI refuses an uncovered
 	// one. The errors Parse does return are its own: the limits below.
+	// ⛔ BEFORE xhtml.Parse, because that is where the memory goes. The ceilings
+	// in conv.spend are checked while this package walks the tree, which is
+	// after golang.org/x/net/html has built all of it — see Limits.MaxInputBytes
+	// for the measurement.
+	lim = lim.orDefaults()
+	if len(src) > lim.MaxInputBytes {
+		return nil, fmt.Errorf("html: %d bytes of source, and the limit is %d",
+			len(src), lim.MaxInputBytes)
+	}
+	if err := countSourceElements(src, lim.MaxSourceElements); err != nil {
+		return nil, err
+	}
+
 	root, _ := xhtml.Parse(bytes.NewReader(src))
-	c := &conv{limits: lim.orDefaults()}
+	c := &conv{limits: lim}
 	doc := &richdoc.Document{}
 	htmlEl, head, body := sections(root)
 	doc.Meta = meta(htmlEl, head)
