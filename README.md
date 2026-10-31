@@ -99,18 +99,81 @@ marking, because every case it had put the space in a node of its own.
 ## ⛔ The limits are the security surface
 
 ```go
-html.Limits{MaxDepth: 256, MaxNodes: 1 << 20} // the defaults
+html.Limits{
+    MaxDepth:          256,       // our walk of the tree
+    MaxNodes:          1 << 20,   // our walk of the tree
+    MaxInputBytes:     64 << 20,  // the source, before it is parsed  (v0.2.0)
+    MaxSourceElements: 1 << 20,   // the source, before it is parsed  (v0.2.0)
+}
 ```
 
-Two shapes of abuse, two numbers. A document a thousand elements deep is one;
-a flat document with four million empty spans is the other, and `MaxDepth`
-says nothing about it.
+Two shapes of abuse, two numbers — then a third thing the first two cannot see.
+A document a thousand elements deep is one shape; a flat document with four
+million empty spans is the other, and `MaxDepth` says nothing about it.
 
 The depth guard is **where our own recursion is**, which is the opposite of the
 rule for `encoding/xml`: `x/net/html` builds its tree without recursing, so a
 deep document costs it nothing and costs this package a stack. (In
 [go-odf/odf](https://github.com/go-odf/odf) the decoder was the one that
 recursed, and a guard in the caller never ran.)
+
+### ⛔ Those two bound the walk, and the walk is not where the memory goes
+
+`x/net/html` has built the **entire tree** before `conv.spend` is called once,
+and it has no ceiling of its own to fall back on: its only limit is
+`Tokenizer.SetMaxBuf`, which `html.Parse` does not set (x/net **v0.62.0**, the
+version this module pins and the version these numbers mean: `token.go:149` and
+`:1278`; `parse.go` and `node.go` hold no depth or node bound at all).
+
+The control is two documents refused by the **same ceiling at the same
+element**, the second eight times the source of the first — so nothing after
+that byte should have cost anything:
+
+| | small | 8× the source | ratio |
+| --- | --- | --- | --- |
+| `MaxNodes` alone | 12 063 584 | 96 063 568 | **8.0** |
+| `MaxSourceElements` (v0.2.0) | 7 096 | **7 096** | **1.0** |
+
+Refusing a hostile 3.2 MB document went from **96 MB** to **7 096 bytes**, and
+the figure no longer moves with the file's size at all. One byte of source buys
+**56.3** bytes of heap at the cheapest shape, 16.5 on a page of prose — so
+before `MaxInputBytes` there was no bound on memory whatsoever.
+
+⛔ **`MaxSourceElements` is its own ceiling and not a proxy for `MaxNodes`**, and
+it cannot be derived from one: tags in `<head>` are never walked, so a document
+can hold a million of them and reach `MaxNodes` at nearly zero. A source-side
+count is therefore no lower bound on what the walk will count — and a guard that
+refuses what the thing it protects would accept is worse than no guard. A test
+asserts both answers to that document, because both are right: they answer two
+questions.
+
+⛔ **It counts with the tokenizer, not with a scan for `<`.** A scan counts the
+`<` inside an attribute value, inside a comment and inside a `<script>`, and the
+three disagree with the parser in different directions; a guard built on one
+would refuse documents over their punctuation. Four such documents are in the
+suite.
+
+### The defaults come from 123 369 real files
+
+Measured with `htmlcorpus/htmlsizeprobe --reader`, which asks **this reader**
+for its verdict on every file rather than trusting a percentile:
+
+| | p50 | p90 | p99 | p99.9 | max |
+| --- | --- | --- | --- | --- | --- |
+| bytes | 6 824 | 63 322 | 179 074 | 1 765 776 | **19 873 471** |
+| elements | 91 | 1 218 | 3 812 | 9 794 | **98 961** |
+| tokenizer depth | 7 | 15 | 33 | 329 | **3 140** |
+
+**Every one of the 123 369 is accepted — 100.0000%.** The biggest is Chromium's
+licence page at 19.87 MB, the widest is the ODF 1.3 specification at 98 961
+elements, and the deepest is GNU's `bash` manual.
+
+⛔ That last column is why the probe asks the reader. It tokenizes **3 140**
+levels deep against a `MaxDepth` of **256** — so the percentile says 0.1% of
+real documents are past the default, and the truth is **zero**: unclosed tags
+make the tokenizer's nesting climb where the HTML5 algorithm closes them. A
+default "corrected" from that column would have loosened a ceiling that was
+never tight. The probe's own documentation carries the 12× gap.
 
 Thirteen pathological documents are in the suite — unclosed tags fifty deep,
 tags closed in the wrong order, forty nested tables, a comment that never
