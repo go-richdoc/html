@@ -60,7 +60,9 @@ import (
 // 94 736 400 bytes run first and 40 386 560 run second — the same work, two
 // numbers, decided by test order. A cap is about what the process holds, so it
 // is compared against what the process holds.
-func underHeapCap(t *testing.T, limit int64, f func()) uint64 {
+// It also returns what f asked the allocator for, which is the figure that
+// NAMES a regression — see TestTheBombsRunUnderACapAndStayWellInsideIt.
+func underHeapCap(t *testing.T, limit int64, f func()) (held, asked uint64) {
 	t.Helper()
 
 	// ⛔ The limit is process-wide, so it is restored even if f panics, and no
@@ -69,11 +71,17 @@ func underHeapCap(t *testing.T, limit int64, f func()) uint64 {
 	t.Cleanup(func() { debug.SetMemoryLimit(previous) })
 
 	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+
 	f()
 
 	var after runtime.MemStats
 	runtime.ReadMemStats(&after)
-	return after.Sys
+	// ⛔ TotalAlloc's delta is sound where Sys's is not: it is a cumulative
+	// counter of bytes handed out, so the difference is exactly what f asked
+	// for, whatever ran before it.
+	return after.Sys, after.TotalAlloc - before.TotalAlloc
 }
 
 // TestTheCapCanActuallyFire is the instrument's self-comparison, and it comes
@@ -94,13 +102,13 @@ func TestTheCapCanActuallyFire(t *testing.T) {
 		tinyCap = 8 << 20
 		live    = 64 << 20
 	)
-	var held [][]byte
-	peak := underHeapCap(t, tinyCap, func() {
+	var kept [][]byte
+	peak, _ := underHeapCap(t, tinyCap, func() {
 		for range 64 {
-			held = append(held, make([]byte, 1<<20))
+			kept = append(kept, make([]byte, 1<<20))
 		}
 	})
-	runtime.KeepAlive(held)
+	runtime.KeepAlive(kept)
 
 	if peak <= tinyCap {
 		t.Errorf("the process holds %d bytes for %d bytes of live data under a %d-byte "+
@@ -113,18 +121,32 @@ func TestTheCapCanActuallyFire(t *testing.T) {
 
 // TestTheBombsRunUnderACapAndStayWellInsideIt.
 //
-// ⛔ The cap is 256 MiB, chosen from the measurement below and not from taste:
-// the largest refusal in this package reserves about 100 MB from the operating
-// system, so a cap two and a half times that leaves the legitimate case room
-// and still stops a regression — eight times the source at the same ceiling —
-// from growing without bound. It fails here instead of on somebody's machine.
+// ⛔ TWO ASSERTIONS, AND THE CAP IS THE WEAKER ONE. A gate that protects by
+// AVOIDANCE hides what it avoids: under a soft limit a reader whose ceiling
+// regressed does not reserve more memory, it makes the collector work harder to
+// stay inside the limit — so the failure arrives as a test that takes minutes,
+// and a slow test reads as a slow machine, not as a broken bound. The cap is
+// the host's safety net and nothing else.
+//
+// What NAMES the regression is `asked`: TotalAlloc is a cumulative counter, so
+// the collector cannot hold it down and no amount of thrashing hides it. Its
+// ceiling per case is measured, and it fails immediately with both numbers in
+// the message.
+//
+// ⛔ The per-case ceilings are the point. The walk ceiling legitimately asks for
+// about 96 MB to refuse this document — that is the defect it characterises —
+// so 192 MiB there is only a sanity bound on the test's own input. The source
+// ceiling asks for 7 096 bytes, so 1 MiB there is TIGHT: if the pre-scan ever
+// stops refusing before the tree is built, that case jumps four orders of
+// magnitude and says so in one line.
 func TestTheBombsRunUnderACapAndStayWellInsideIt(t *testing.T) {
 	const cap256 = 256 << 20
 
 	for _, c := range []struct {
-		name string
-		lim  Limits
-		src  []byte
+		name     string
+		lim      Limits
+		src      []byte
+		maxAsked uint64
 	}{
 		{
 			// The expensive one: the walk ceiling alone, which lets
@@ -132,17 +154,19 @@ func TestTheBombsRunUnderACapAndStayWellInsideIt(t *testing.T) {
 			"the walk ceiling alone, 800 000 elements",
 			Limits{MaxNodes: expCeiling, MaxSourceElements: 1 << 30},
 			flatNodes(expLarge),
+			192 << 20, // it asks for ~96 MB; a sanity bound
 		},
 		{
-			// And the cheap one, for contrast in the same units.
+			// And the cheap one, whose figure is the one worth watching.
 			"the source ceiling, 800 000 elements",
 			Limits{MaxSourceElements: expCeiling},
 			flatNodes(expLarge),
+			1 << 20, // it asks for ~7 KB; tight on purpose
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			var err error
-			peak := underHeapCap(t, cap256, func() {
+			peak, asked := underHeapCap(t, cap256, func() {
 				_, err = Parse(c.src, c.lim)
 			})
 
@@ -153,8 +177,14 @@ func TestTheBombsRunUnderACapAndStayWellInsideIt(t *testing.T) {
 			if err == nil {
 				t.Fatalf("%d bytes was accepted", len(c.src))
 			}
-			t.Logf("%d bytes refused (%v); the process holds %d bytes", len(c.src), err, peak)
+			t.Logf("%d bytes refused (%v); asked for %d bytes, process holds %d",
+				len(c.src), err, asked, peak)
 
+			if asked > c.maxAsked {
+				t.Errorf("asked the allocator for %d bytes to refuse %d bytes of source, "+
+					"past the %d-byte ceiling: the bound is no longer refusing before "+
+					"the work", asked, len(c.src), c.maxAsked)
+			}
 			if peak > cap256 {
 				t.Errorf("the process holds %d bytes, past the %d-byte cap",
 					peak, cap256)
