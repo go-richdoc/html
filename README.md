@@ -175,7 +175,22 @@ refusal**: it holds against incremental growth (a million small nodes, which is
 every bomb here) and does *nothing* against one enormous request, which only
 RLIMIT_AS stops.
 
-⛔ Two things the tests say out loud, because both were wrong first:
+⛔ **And a gate that protects by avoidance hides what it avoids**, so the cap is
+the *weaker* of two assertions. Under a soft limit a reader whose ceiling
+regressed does not reserve more memory — it makes the collector work harder to
+stay inside the limit, so the failure arrives as a test that takes minutes, and
+a slow test reads as a slow machine rather than as a broken bound.
+
+What *names* the regression is what the call asked the allocator for:
+`TotalAlloc` is cumulative, so no amount of thrashing hides it, and its delta is
+order-independent. Per case, measured:
+
+| | asks for | ceiling | |
+| --- | --- | --- | --- |
+| the walk ceiling alone | 96 063 696 | 192 MiB | a sanity bound on the test's own input |
+| the source ceiling | **7 096** | **1 MiB** | tight: a four-order jump if the pre-scan stops refusing first |
+
+⛔ Two more things the tests say out loud, because both were wrong first:
 
 - **A cap nobody has seen trip is not a cap.** A separate test allocates 64 MiB
   live under an 8 MiB cap and asserts the helper reports past it — without that,
