@@ -153,6 +153,41 @@ three disagree with the parser in different directions; a guard built on one
 would refuse documents over their punctuation. Four such documents are in the
 suite.
 
+### ⛔ A bomb test must not be able to take the machine with it
+
+The expensive refusal above holds about **114 MB** from the operating system, and
+it runs on every CI job of every target. It now runs under a **256 MiB** heap cap
+(`debug.SetMemoryLimit`, which is `GOMEMLIMIT` by another name), chosen as 2.2×
+the measured figure, so a regression fails here rather than on somebody's
+machine.
+
+The shape comes from an incident in a sibling project: a test handed an
+unclamped viewBox to a rasterizer, asked for about **40 GB**, and OOM-killed the
+linux/amd64 CI runner — while darwin **overcommitted lazily and hid it** on the
+machine it was written on. A ten-target cross-build compiles everywhere and
+*runs* the tests on one target, so that did not catch it either.
+
+⛔ **`ulimit -v` is a no-op on darwin** (RLIMIT_AS is ignored), so the shell half
+of that guard protects CI and nothing locally — backwards from where a bomb gets
+written. What works in both places is Go's own soft limit plus a figure read back
+from `runtime.MemStats`. And the soft limit is a **GC target, not an allocation
+refusal**: it holds against incremental growth (a million small nodes, which is
+every bomb here) and does *nothing* against one enormous request, which only
+RLIMIT_AS stops.
+
+⛔ Two things the tests say out loud, because both were wrong first:
+
+- **A cap nobody has seen trip is not a cap.** A separate test allocates 64 MiB
+  live under an 8 MiB cap and asserts the helper reports past it — without that,
+  the cap on the real bombs is a claim that the comparison works, not evidence.
+- **The figure is absolute, not a delta.** `Sys` never shrinks, so
+  `after - before` reports what a call *added* to whatever an earlier test grew:
+  the same bomb measured **94 736 400** bytes run first and **40 386 560** run
+  second. Same work, two numbers, decided by test order. A cap is about what the
+  process holds, so it is compared against what the process holds — while the
+  per-call comparison between readers stays in the file that measures
+  `TotalAlloc`, which is order-independent.
+
 ### The defaults come from 123 369 real files
 
 Measured with `htmlcorpus/htmlsizeprobe --reader`, which asks **this reader**
