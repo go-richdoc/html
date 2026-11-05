@@ -1,11 +1,68 @@
 # html
 
-**HTML and XHTML into [richdoc](https://github.com/go-richdoc/richdoc).**
+**HTML and XHTML ⇄ [richdoc](https://github.com/go-richdoc/richdoc).**
 Pure Go, CGO-free, including `GOOS=js`.
 
 ```go
 doc, err := html.Parse(src, html.Limits{})
+page, err := html.Write(doc)
 ```
+
+## Why there is a writer
+
+⛔ **Every reader in go-richdoc reached a dead end here.** Word, Excel and
+PowerPoint (`go-ooxml`), ODT, ODS, ODP and ODG (`go-odf`), Markdown, CSV, JSON,
+XML, plain text, EPUB, MOBI, FB2 and email (`go-richdoc`) all arrive at the
+same model — and the model had no way out to a laid-out page. Measured on
+2026-11-05 with `fleetverbs`: every `ToPDF` in the fleet lives in
+`go-pdfkit/convert`, and every one of them takes pictures, an SVG, a ZIP of
+pictures or an XPS package. **Seventeen capabilities were missing for want of
+one writer.**
+
+A complete document and not a fragment, because the thing that lays HTML out —
+[`go-pdfkit/html2pdf`](https://github.com/go-pdfkit/html2pdf) — takes a
+document, and because `Parse` reads the head: the language off `<html lang>`,
+the title off `<title>`, and author, description and date off `<meta name>`.
+
+### What does not survive a round trip
+
+Named, rather than left to be discovered. `Parse` does not read these back:
+
+- `Image`'s `Width`, `Height`, `Scale` and `Align` — **written all the same**,
+  because what lays the page out does read them;
+- classes everywhere except a code block's language, which survives as
+  `class="language-x"` because that is the one class the parser looks for;
+- `Math` and `MathBlock` carry TeX and HTML has no element for it, so they are
+  written as the delimited source and come back as text;
+- `Footnote` becomes a reference and a list at the end; `CrossRef` becomes a
+  link to its target;
+- `RawBlock` and `RawInline` are kept verbatim for `html`, `svg` and `math` —
+  the three the parser itself produces — and **dropped** otherwise.
+
+### Four defects the tests found before this shipped
+
+⛔ **An attribute written with `%q` can be closed by its own value.** `%q` is
+*Go* quoting: a title holding a double quote came out as `he said \"no\"`, and
+an HTML parser, which has never heard of a backslash escape, ends the attribute
+at the second quote. On a title that is a truncated tooltip; on any attribute
+it is an **injection**, because `" onload="…` closes one attribute and opens
+another. Found by a round-trip comparison that was not looking for a
+vulnerability.
+
+The other three came from `FuzzWritingTwiceChangesNothing`, which asserts the
+property that holds when there is no ground truth: a round trip need not be the
+identity — the losses above are real — but it must reach a **fixpoint**. Once
+through the pair, writing again must produce the same bytes, or every second
+conversion of a file is a different file and nothing says which is right.
+
+| input | what it exposed |
+|---|---|
+| `0 <a></a> 0` | two adjacent text runs each holding one space; the join wrote two, and HTML collapses them on the next read |
+| `\v` | a paragraph rendering to nothing but space, which the parser drops |
+| `\v0` | a block's leading space, which the parser trims |
+
+**9 833 539 executions, no disagreement.** The three inputs are in
+`testdata/fuzz/`.
 
 This is the piece the ebook formats were missing. EPUB's content documents are
 XHTML, MOBI's text is HTML, and the body of nearly every HTML email is HTML —
