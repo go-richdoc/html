@@ -4,6 +4,7 @@
 package html
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -352,6 +353,263 @@ func TestANilDocumentIsAnEmptyPageAndNotNothing(t *testing.T) {
 	}
 	if _, err := Parse(b, Limits{}); err != nil {
 		t.Errorf("the empty page does not parse: %v", err)
+	}
+}
+
+// ⛔ A heading level is CLAMPED rather than refused. richdoc says 1..6 and
+// nothing enforces it; HTML has h1..h6 and nothing else. A producer that
+// counted its own nesting past six should get an h6, not a tag no browser has.
+func TestAHeadingLevelOutsideOneToSixIsClamped(t *testing.T) {
+	for _, c := range []struct{ level, want int }{{0, 1}, {-3, 1}, {7, 6}, {99, 6}} {
+		in := &richdoc.Document{Blocks: []richdoc.Block{
+			richdoc.Heading{Level: c.level, Inlines: runs("h")},
+		}}
+		b, err := Write(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(b), fmt.Sprintf("<h%d>h</h%d>", c.want, c.want)) {
+			t.Errorf("level %d did not become h%d:\n%s", c.level, c.want, b)
+		}
+	}
+}
+
+// A heading with nothing in it and no anchor is nothing. One with an anchor is
+// a target, and a target with no text is still a place to link to.
+func TestAnEmptyHeadingIsDroppedUnlessItIsATarget(t *testing.T) {
+	empty := &richdoc.Document{Blocks: []richdoc.Block{richdoc.Heading{Level: 2}}}
+	b, err := Write(empty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "<h2") {
+		t.Errorf("an empty heading was written:\n%s", b)
+	}
+	target := &richdoc.Document{Blocks: []richdoc.Block{richdoc.Heading{Level: 2, ID: "here"}}}
+	if b, err = Write(target); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `id="here"`) {
+		t.Errorf("a heading that is only an anchor was dropped:\n%s", b)
+	}
+}
+
+// ⛔ An empty item is still an item: a list of three bullets whose middle one
+// is blank has three bullets. What it must not become is an item holding an
+// empty paragraph, which renders as a bullet followed by a blank line.
+func TestAnEmptyListItemKeepsItsBullet(t *testing.T) {
+	in := &richdoc.Document{Blocks: []richdoc.Block{richdoc.List{Tight: true, Items: []richdoc.ListItem{
+		{Blocks: []richdoc.Block{richdoc.Paragraph{Inlines: runs("one")}}},
+		{},
+		{Blocks: []richdoc.Block{richdoc.Paragraph{Inlines: runs("three")}}},
+	}}}}
+	b, err := Write(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(b), "<li>"); n != 3 {
+		t.Errorf("%d bullets for three items:\n%s", n, b)
+	}
+}
+
+// A cell may hold real block content, and Cell.Content is the preference
+// order: the blocks when the producer filled them, the flattened inlines when
+// it did not.
+func TestACellHoldsBlocksAndAnEmptyCellIsEmpty(t *testing.T) {
+	in := &richdoc.Document{Blocks: []richdoc.Block{richdoc.Table{
+		Rows: [][]richdoc.Cell{{
+			{
+				Inlines: runs("a b"),
+				Blocks: []richdoc.Block{
+					richdoc.Paragraph{Inlines: runs("a")},
+					richdoc.Paragraph{Inlines: runs("b")},
+				},
+			},
+			{},
+		}},
+	}}}
+	b, err := Write(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(b)
+	if !strings.Contains(page, "<p>a</p>") || !strings.Contains(page, "<p>b</p>") {
+		t.Errorf("a cell's blocks were flattened away:\n%s", page)
+	}
+	if !strings.Contains(page, "<td></td>") {
+		t.Errorf("an empty cell is not empty:\n%s", page)
+	}
+}
+
+func TestAColumnAlignmentIsWrittenAsAStyle(t *testing.T) {
+	in := &richdoc.Document{Blocks: []richdoc.Block{richdoc.Table{
+		Align: []richdoc.Alignment{
+			richdoc.AlignLeft, richdoc.AlignCenter, richdoc.AlignRight, richdoc.AlignDefault,
+		},
+		Rows: [][]richdoc.Cell{{
+			{Inlines: runs("l")}, {Inlines: runs("c")},
+			{Inlines: runs("r")}, {Inlines: runs("d")},
+			// ⛔ A fifth cell with only four alignments: a shorter Align slice
+			// leaves the rest at AlignDefault, which the model says outright.
+			{Inlines: runs("x")},
+		}},
+	}}}
+	b, err := Write(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(b)
+	for _, want := range []string{"text-align: left", "text-align: center", "text-align: right"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("%q is missing:\n%s", want, page)
+		}
+	}
+	if n := strings.Count(page, "text-align"); n != 3 {
+		t.Errorf("%d alignments written; the default and the missing one carry none:\n%s", n, page)
+	}
+}
+
+// A cross-reference with no visible text stands in its target, which is what
+// the model says a renderer should supply.
+func TestACrossReferenceWithNoTextNamesItsTarget(t *testing.T) {
+	in := &richdoc.Document{Blocks: []richdoc.Block{richdoc.Paragraph{Inlines: []richdoc.Inline{
+		richdoc.CrossRef{Target: "eq-1"},
+	}}}}
+	b, err := Write(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `<a href="#eq-1">eq-1</a>`) {
+		t.Errorf("the target did not stand in for the text:\n%s", b)
+	}
+}
+
+func TestAnImageCarriesItsAlignmentAndItsClasses(t *testing.T) {
+	for _, c := range []struct {
+		align richdoc.Alignment
+		want  string
+	}{
+		{richdoc.AlignLeft, "float: left"},
+		{richdoc.AlignCenter, "display: block"},
+		{richdoc.AlignRight, "float: right"},
+	} {
+		in := &richdoc.Document{Blocks: []richdoc.Block{richdoc.Paragraph{Inlines: []richdoc.Inline{
+			richdoc.Image{URL: "a.png", Align: c.align, Classes: []string{"figure"}},
+		}}}}
+		b, err := Write(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(b), c.want) {
+			t.Errorf("alignment %v did not write %q:\n%s", c.align, c.want, b)
+		}
+		if !strings.Contains(string(b), `class="figure"`) {
+			t.Errorf("an image's classes were dropped:\n%s", b)
+		}
+	}
+}
+
+// A quotation of nothing is nothing: reading `<blockquote></blockquote>` back
+// gives no block, so writing one would make the second pass differ.
+func TestAQuotationOfNothingIsNotWritten(t *testing.T) {
+	in := &richdoc.Document{Blocks: []richdoc.Block{
+		richdoc.BlockQuote{Blocks: []richdoc.Block{richdoc.Paragraph{Inlines: runs("   ")}}},
+		richdoc.Paragraph{Inlines: runs("after")},
+	}}
+	b, err := Write(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "<blockquote") {
+		t.Errorf("an empty quotation was written:\n%s", b)
+	}
+	if !strings.Contains(string(b), "after") {
+		t.Errorf("the block after it was lost:\n%s", b)
+	}
+}
+
+// ⛔ A list whose item holds a single block that is NOT a paragraph cannot be
+// written tight: the block needs its own tag inside the <li>, and reading that
+// back marks the whole list loose.
+func TestAnItemHoldingOneNonParagraphMakesTheListLoose(t *testing.T) {
+	in := &richdoc.Document{Blocks: []richdoc.Block{richdoc.List{
+		Tight: true,
+		Items: []richdoc.ListItem{
+			{Blocks: []richdoc.Block{richdoc.Paragraph{Inlines: runs("a")}}},
+			{Blocks: []richdoc.Block{richdoc.CodeBlock{Text: "c"}}},
+		},
+	}}}
+	back := writeAndParse(t, in)
+	got, ok := back.Blocks[0].(richdoc.List)
+	if !ok {
+		t.Fatalf("the list came back as %#v", back.Blocks[0])
+	}
+	if got.Tight {
+		t.Error("a list holding a code block came back tight")
+	}
+	if len(got.Items) != 2 {
+		t.Errorf("%d items, want 2", len(got.Items))
+	}
+}
+
+// ⛔ THIS TEST REPLACES A DEFAULT BRANCH NOTHING COULD REACH. richdoc's Block
+// and Inline are CLOSED sets — their marker methods are unexported — so no
+// test outside that package can construct a foreign node, and a default branch
+// handling one is a guard no test can enter. Instead: one of EVERY type this
+// package knows, and none of them may render to nothing.
+//
+// A type added to richdoc renders as nothing here until it is added to the
+// switch, and this is where that is meant to be noticed.
+func TestEveryBlockAndInlineTypeRendersSomething(t *testing.T) {
+	blocks := []richdoc.Block{
+		richdoc.Heading{Level: 1, Inlines: runs("h")},
+		richdoc.Paragraph{Inlines: runs("p")},
+		richdoc.List{Tight: true, Items: items("i")},
+		richdoc.CodeBlock{Text: "c"},
+		richdoc.BlockQuote{Blocks: []richdoc.Block{richdoc.Paragraph{Inlines: runs("q")}}},
+		richdoc.Table{Rows: [][]richdoc.Cell{{{Inlines: runs("t")}}}},
+		richdoc.ThematicBreak{},
+		richdoc.MathBlock{TeX: "m"},
+		richdoc.RawBlock{Format: "html", Text: "<hr>"},
+	}
+	for _, b := range blocks {
+		var w writer
+		if got := w.block(b, 0); got == "" {
+			t.Errorf("a %T renders to nothing", b)
+		}
+	}
+
+	inlines := []richdoc.Inline{
+		richdoc.Text{Value: "t"},
+		richdoc.Emph{Inlines: runs("e")},
+		richdoc.Strong{Inlines: runs("s")},
+		richdoc.Strikethrough{Inlines: runs("d")},
+		richdoc.Code{Value: "c"},
+		richdoc.Link{URL: "u"},
+		richdoc.Image{URL: "i"},
+		richdoc.Math{TeX: "m"},
+		richdoc.LineBreak{},
+		richdoc.RawInline{Format: "html", Text: "<b>b</b>"},
+		richdoc.Footnote{Blocks: []richdoc.Block{richdoc.Paragraph{Inlines: runs("f")}}},
+		richdoc.Anchor{ID: "a"},
+		richdoc.CrossRef{Target: "x"},
+	}
+	for _, in := range inlines {
+		var w writer
+		if got := w.inline(in); got == "" {
+			t.Errorf("a %T renders to nothing", in)
+		}
+	}
+
+	// ⛔ And the one case that SHOULD render to nothing, so that "nothing" is
+	// a decision here and not an oversight: raw content for a format this
+	// cannot put in an HTML page.
+	var w writer
+	if got := w.block(richdoc.RawBlock{Format: "latex", Text: `\x`}, 0); got != "" {
+		t.Errorf("LaTeX raw content rendered as %q", got)
+	}
+	if got := w.inline(richdoc.RawInline{Format: "latex", Text: `\x`}); got != "" {
+		t.Errorf("LaTeX raw inline rendered as %q", got)
 	}
 }
 

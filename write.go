@@ -179,12 +179,28 @@ func (w *writer) block(b richdoc.Block, depth int) string {
 		if n.Language != "" {
 			code += attrOf("class", "language-"+n.Language)
 		}
+		// ⛔ A LEADING NEWLINE IN THE CODE IS DOUBLED, because reading it back
+		// eats one. HTML drops a newline that opens a <pre>, so a code block
+		// whose first character is one came back a line shorter and the second
+		// pass differed from the first. Writing two leaves one after the drop.
+		// Found by the fixpoint fuzz; no amount of reading the parser would
+		// have suggested it, because the rule is the format's, not the
+		// package's.
+		body := esc(n.Text)
+		if strings.HasPrefix(body, "\n") {
+			body = "\n" + body
+		}
 		return fmt.Sprintf("%s<pre%s>%s>%s</code></pre>",
-			pad, classAttr(n.Classes), code, esc(n.Text))
+			pad, classAttr(n.Classes), code, body)
 
 	case richdoc.BlockQuote:
+		// A quotation of nothing is nothing, for the reason given on item.
+		quoted := w.blocks(n.Blocks, depth+1)
+		if quoted == "" {
+			return ""
+		}
 		return fmt.Sprintf("%s<blockquote%s>\n%s\n%s</blockquote>",
-			pad, classAttr(n.Classes), w.blocks(n.Blocks, depth+1), pad)
+			pad, classAttr(n.Classes), quoted, pad)
 
 	case richdoc.Table:
 		return w.table(n, depth)
@@ -201,12 +217,24 @@ func (w *writer) block(b richdoc.Block, depth int) string {
 		if keepsRaw(n.Format) {
 			return pad + n.Text
 		}
-		return ""
+		// Falls through to the empty return below, which is the ONE path that
+		// reaches it — see the note there.
 	}
-	// ⛔ The block set is closed, so this is unreachable for anything this
-	// package knows — and a richdoc that grew a block type would otherwise
-	// vanish silently rather than show up as something to handle.
-	return fmt.Sprintf("%s<!-- richdoc: a %T that this writer does not know -->", pad, b)
+	// Nothing: a raw block for a format this cannot put in an HTML page, which
+	// the model says a converter may drop.
+	//
+	// ⛔ THERE IS NO DEFAULT BRANCH, AND THAT IS DELIBERATE. There was one,
+	// writing a comment about a block this writer did not know — and nothing
+	// could ever reach it: richdoc's Block is a CLOSED set, its marker method
+	// unexported, so no test outside that package can construct a foreign
+	// block. A guard no test can reach is a claim nobody checks, and this
+	// repository's coverage gate refuses it by name.
+	//
+	// What takes its place is TestEveryBlockAndInlineTypeRendersSomething,
+	// which holds one of each type this package knows. A type ADDED to richdoc
+	// renders as nothing here until it is added above, and that test is where
+	// it is meant to be noticed.
+	return ""
 }
 
 // list renders an ordered or unordered list. A loose list wraps each item's
@@ -221,32 +249,93 @@ func (w *writer) list(n richdoc.List, depth int) string {
 			start = " start=\"" + strconv.Itoa(n.Start) + "\""
 		}
 	}
+	// ⛔⛔ TIGHTNESS IS A PROPERTY OF THE LIST, NOT OF AN ITEM, and writing it
+	// per item makes the pair unstable. An item holding a paragraph AND a
+	// nested list cannot be written without a <p>, and [Parse] marks the WHOLE
+	// list loose the moment any item has one — so a list written tight with
+	// one such item came back loose, and the second pass then wrote every item
+	// loose. A fuzz run found it as a two-item list whose second item held a
+	// sub-list.
+	//
+	// So: tight only when every item can be written tight.
+	tight := n.Tight && w.everyItemIsOneParagraph(n.Items)
+
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s<%s%s%s>\n", pad, tag, start, classAttr(n.Classes))
 	for _, item := range n.Items {
 		fmt.Fprintf(&b, "%s  <li>", pad)
-		b.WriteString(w.item(item, n.Tight, depth+2))
+		b.WriteString(w.item(item, tight, depth+2))
 		b.WriteString("</li>\n")
 	}
 	fmt.Fprintf(&b, "%s</%s>", pad, tag)
 	return b.String()
 }
 
+// live is the blocks that render to something.
+//
+// ⛔⛔ EVERY "IS THIS ONE PARAGRAPH?" QUESTION IS ASKED OF THESE, NOT OF THE
+// SLICE. A container holding a paragraph and a block that renders to nothing —
+// an empty paragraph, a raw node for another format — has two blocks and one
+// rendering, so a count said "not one paragraph" and the writer wrapped it in
+// <p>, while reading it back gave one paragraph and the next write unwrapped
+// it. The fuzz found it twice, in a list item and in a table cell.
+func (w *writer) live(bs []richdoc.Block) []richdoc.Block {
+	out := make([]richdoc.Block, 0, len(bs))
+	for _, b := range bs {
+		if w.block(b, 0) != "" {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
+// everyItemIsOneParagraph says whether a list can be written tight: an item
+// holding anything but a single paragraph needs a <p> or a nested block, and
+// either one makes the list loose when it is read back.
+//
+// An EMPTY item does not force loose — it writes as <li></li>, which carries no
+// paragraph at all.
+func (w *writer) everyItemIsOneParagraph(items []richdoc.ListItem) bool {
+	for _, item := range items {
+		live := w.live(item.Blocks)
+		switch len(live) {
+		case 0:
+			continue
+		case 1:
+			if _, ok := live[0].(richdoc.Paragraph); ok {
+				continue
+			}
+			return false
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // item renders one list item's blocks. A tight item unwraps a lone paragraph,
 // because a <p> inside an <li> is what makes a list loose.
 func (w *writer) item(item richdoc.ListItem, tight bool, depth int) string {
-	if tight && len(item.Blocks) == 1 {
-		if p, ok := item.Blocks[0].(richdoc.Paragraph); ok {
+	live := w.live(item.Blocks)
+	if tight && len(live) == 1 {
+		if p, ok := live[0].(richdoc.Paragraph); ok {
 			return w.flow(p.Inlines)
 		}
 	}
-	if len(item.Blocks) == 0 {
-		// ⛔ An empty item is still an item. Writing nothing inside the <li>
-		// keeps the bullet, which is what an empty bullet looks like; writing a
-		// paragraph would put a blank line in the middle of the list.
+	// ⛔ An empty item is still an item. Writing nothing inside the <li> keeps
+	// the bullet, which is what an empty bullet looks like; writing a paragraph
+	// would put a blank line in the middle of the list.
+	//
+	// ⛔ And "empty" is what the blocks RENDER to, not how many there are. An
+	// item holding one paragraph of nothing but space has a block and renders
+	// to nothing, and the first version wrote `<li>\n\n  </li>` for it — which
+	// reads back as `<li></li>` and made the second pass differ. The fuzz found
+	// it; counting blocks would never have.
+	body := w.blocks(item.Blocks, depth)
+	if body == "" {
 		return ""
 	}
-	return "\n" + w.blocks(item.Blocks, depth) + "\n" + strings.Repeat("  ", depth-1)
+	return "\n" + body + "\n" + strings.Repeat("  ", depth-1)
 }
 
 // table renders a table with its caption, header and alignments.
@@ -289,16 +378,18 @@ func (w *writer) row(cells []richdoc.Cell, align []richdoc.Alignment, tag string
 // cell renders a cell's content, which is [richdoc.Cell.Content]'s answer: the
 // blocks when the producer filled them, and the flattened inlines otherwise.
 func (w *writer) cell(c richdoc.Cell, depth int) string {
-	blocks := c.Content()
+	blocks := w.live(c.Content())
 	if len(blocks) == 1 {
 		if p, ok := blocks[0].(richdoc.Paragraph); ok {
 			return w.flow(p.Inlines)
 		}
 	}
-	if len(blocks) == 0 {
+	// Empty is what the blocks RENDER to, as in item above.
+	body := w.blocks(blocks, depth)
+	if body == "" {
 		return ""
 	}
-	return "\n" + w.blocks(blocks, depth) + "\n" + strings.Repeat("  ", depth-1)
+	return "\n" + body + "\n" + strings.Repeat("  ", depth-1)
 }
 
 // spanAttr writes colspan and rowspan, which Parse reads back.
@@ -405,7 +496,7 @@ func (w *writer) inline(in richdoc.Inline) string {
 		if keepsRaw(n.Format) {
 			return n.Text
 		}
-		return ""
+		// Falls through to the empty return below, as RawBlock does.
 	case richdoc.Footnote:
 		w.footnotes = append(w.footnotes, "")
 		at := len(w.footnotes)
@@ -422,6 +513,9 @@ func (w *writer) inline(in richdoc.Inline) string {
 		}
 		return fmt.Sprintf("<a%s>%s</a>", attrOf("href", "#"+n.Target), text)
 	}
+	// Nothing: a raw inline for a format this cannot put in an HTML page. The
+	// inline set is closed too, so there is no default branch here either —
+	// see the note at the end of block.
 	return ""
 }
 

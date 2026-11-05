@@ -39,7 +39,7 @@ Named, rather than left to be discovered. `Parse` does not read these back:
 - `RawBlock` and `RawInline` are kept verbatim for `html`, `svg` and `math` —
   the three the parser itself produces — and **dropped** otherwise.
 
-### Four defects the tests found before this shipped
+### Eight defects the tests found before this shipped
 
 ⛔ **An attribute written with `%q` can be closed by its own value.** `%q` is
 *Go* quoting: a title holding a double quote came out as `he said \"no\"`, and
@@ -55,13 +55,21 @@ identity — the losses above are real — but it must reach a **fixpoint**. Onc
 through the pair, writing again must produce the same bytes, or every second
 conversion of a file is a different file and nothing says which is right.
 
-| input | what it exposed |
-|---|---|
-| `0 <a></a> 0` | two adjacent text runs each holding one space; the join wrote two, and HTML collapses them on the next read |
-| `\v` | a paragraph rendering to nothing but space, which the parser drops |
-| `\v0` | a block's leading space, which the parser trims |
+| what it exposed |
+|---|
+| two adjacent text runs each holding one space: the join wrote two, and HTML collapses them on the next read |
+| a paragraph rendering to nothing but space, which the parser drops |
+| a block's leading space, which the parser trims |
+| **tightness written per ITEM**: an item holding a paragraph *and* a sub-list needs a `<p>`, and the parser marks the **whole list** loose the moment one item has one |
+| an item whose only block renders to nothing — "empty" is what the blocks **render to**, not how many there are |
+| a leading newline in a code block: HTML drops the one that opens a `<pre>`, so it has to be written twice |
+| the same empty-render hole in a table cell, where a count said "not one paragraph" and the rendering said it was |
 
-**9 833 539 executions, no disagreement.** The three inputs are in
+⛔ Four of those seven are one mistake in different clothes: **asking how many
+blocks a container holds instead of what they render to.** `live` is the answer,
+and the fuzz had to find it four times before it was written.
+
+**68 582 727 executions, no disagreement.** All seven inputs are committed under
 `testdata/fuzz/`.
 
 This is the piece the ebook formats were missing. EPUB's content documents are
