@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("<ul><li>\v<li>0<p>0")
