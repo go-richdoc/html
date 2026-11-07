@@ -255,18 +255,28 @@ order-independent. Per case, measured:
 | the walk ceiling alone | 96 063 696 | 192 MiB | a sanity bound on the test's own input |
 | the source ceiling | **7 096** | **1 MiB** | tight: a four-order jump if the pre-scan stops refusing first |
 
-⛔ Two more things the tests say out loud, because both were wrong first:
+⛔ **The guards themselves are no longer here.** They live in
+[`richdoc/bombtest`](https://pkg.go.dev/github.com/go-richdoc/richdoc/bombtest),
+and the copy is how the mistakes got made in the first place — a `Sys` delta
+that was order-dependent, a cap nobody had seen trip, a refusal assertion easy
+to leave out. Three readers in this family needed the same guards, so the
+questions moved into a package that **will not run a bomb which has not
+answered them**: `Bound` has no defaults, and `Run` refuses *before* the bomb
+allocates.
 
-- **A cap nobody has seen trip is not a cap.** A separate test allocates 64 MiB
-  live under an 8 MiB cap and asserts the helper reports past it — without that,
-  the cap on the real bombs is a claim that the comparison works, not evidence.
-- **The figure is absolute, not a delta.** `Sys` never shrinks, so
-  `after - before` reports what a call *added* to whatever an earlier test grew:
-  the same bomb measured **94 736 400** bytes run first and **40 386 560** run
-  second. Same work, two numbers, decided by test order. A cap is about what the
-  process holds, so it is compared against what the process holds — while the
-  per-call comparison between readers stays in the file that measures
-  `TotalAlloc`, which is order-independent.
+What stays here is this package's own numbers — how much each refusal
+legitimately costs, which is the one thing a shared gate cannot know.
+
+The two mistakes it now makes unavailable, both of which happened here first:
+
+- **A cap nobody has seen trip is not a cap.** The gate's own test allocates
+  past a one-byte cap and asserts it is reported; its coverage gate is what
+  demanded that test, having left `Run` at 96.3% with exactly that branch unrun.
+- **A delta of `Sys` is not expressible.** `Sys` never shrinks, so
+  `after - before` reports what a call *added* to whatever grew the arena
+  before it: the same bomb measured **94 736 400** bytes run first and
+  **40 386 560** run second. `Result.Held` is absolute and `Result.Asked` is the
+  difference of `TotalAlloc`, which is cumulative and therefore sound.
 
 ### The defaults come from 123 369 real files
 
