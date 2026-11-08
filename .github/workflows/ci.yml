@@ -25,9 +25,12 @@ jobs:
       CGO_ENABLED: "1"
     steps:
       - uses: actions/checkout@v7
+      # go.mod and not a hard-coded version, which `gofloor` reports as a
+      # finding: a lane pinned beside a go.mod drifts from it silently, and
+      # the toolchain decides every standard-library finding.
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.27.3'
+          go-version-file: go.mod
       - name: Gofmt
         run: |
           out=$(gofmt -l .)
