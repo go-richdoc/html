@@ -1,4 +1,4 @@
-github.com/go-richdoc/richdoc v0.8.0 h1:Ccoffz72tulVv76WxPZJYZUKBG8XLU6ziKvag8rNP9w=
-github.com/go-richdoc/richdoc v0.8.0/go.mod h1:RhxAcqwoUg1pnTYCiRdKILzOZwOmraO0dMJI4N6yY70=
+github.com/go-richdoc/richdoc v0.9.0 h1:t3XcDNQN+e2KrEERu6qctlYahSDZkbEGgGDeZxta3iA=
+github.com/go-richdoc/richdoc v0.9.0/go.mod h1:xsldfEfOJy3uWrzpXuz57+w915kDv5B0rPGKiqAzHQs=
 golang.org/x/net v0.62.0 h1:18ELalfM5+XNRwzM2nYqXsZQ9ByS1uhj2O/U7+5jqRY=
 golang.org/x/net v0.62.0/go.mod h1:WgDCOTH8iwtB66T4/GfI94AHo/hhdb7Hah9NDseQfiI=
